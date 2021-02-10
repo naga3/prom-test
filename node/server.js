@@ -1,42 +1,108 @@
-const prometheusClient = require("prom-client");
-const collectDefaultMetrics = prometheusClient.collectDefaultMetrics;
+'use strict';
 
-collectDefaultMetrics();  // デフォルトで組み込まれているメトリクスを、デフォルト10秒間隔で取得
-// collectDefaultMetrics({ timeout: 5000 });  // デフォルトで組み込まれているメトリクスを、5秒おきに取得
+const express = require('express');
+const client = require('prom-client')
 
-const express = require("express");
-const app = express();
+const server = express();
+const register = client.register;
 
-let counter = 0;
-const callCounter = new prometheusClient.Counter({
-                        name: "method_call_counter",
-                        help: "counter for method call count",
-                        labelNames: ["method", "path"]
-                    });
-const incRequestSummary = new prometheusClient.Summary({
-                        name: "inc_request_summary",
-                        help: "summary for inc method call summary",
-                    });
+// Enable collection of default metrics
 
-app.get("/metrics", (req, res) => {
-    res.set("Content-Type", "text/plain");
-    res.send(prometheusClient.register.metrics());
+client.collectDefaultMetrics({
+	gcDurationBuckets: [0.001, 0.01, 0.1, 1, 2, 5], // These are the default buckets.
 });
 
-app.get("/counter/current", (req, res) => {
-    callCounter.labels("inc", "/counter/current").inc();
-    res.send(`current counter = ${counter}`);
+// Create custom metrics
+
+const Histogram = client.Histogram;
+const h = new Histogram({
+	name: 'test_histogram',
+	help: 'Example of a histogram',
+	labelNames: ['code'],
 });
 
-app.get("/counter/inc", (req, res) => {
-    const end = incRequestSummary.startTimer();
-    try {
-        counter++;
-        callCounter.labels("inc", "/counter/inc").inc();
-        res.send(`increment counter = ${counter}`);
-    } finally {
-        end();
-    }
+const Counter = client.Counter;
+const c = new Counter({
+	name: 'test_counter',
+	help: 'Example of a counter',
+	labelNames: ['code'],
 });
 
-app.listen(4000, () => console.log(`[${new Date()}] server startup.`));
+new Counter({
+	name: 'scrape_counter',
+	help: 'Number of scrapes (example of a counter with a collect fn)',
+	collect() {
+		// collect is invoked each time `register.metrics()` is called.
+		this.inc();
+	},
+});
+
+const Gauge = client.Gauge;
+const g = new Gauge({
+	name: 'test_gauge',
+	help: 'Example of a gauge',
+	labelNames: ['method', 'code'],
+});
+
+// Set metric values to some random values for demonstration
+
+setTimeout(() => {
+	h.labels('200').observe(Math.random());
+	h.labels('300').observe(Math.random());
+}, 10);
+
+setInterval(() => {
+	c.inc({ code: 200 });
+}, 5000);
+
+setInterval(() => {
+	c.inc({ code: 400 });
+}, 2000);
+
+setInterval(() => {
+	c.inc();
+}, 2000);
+
+setInterval(() => {
+	g.set({ method: 'get', code: 200 }, Math.random());
+	g.set(Math.random());
+	g.labels('post', '300').inc();
+}, 100);
+
+const t = [];
+setInterval(() => {
+	for (let i = 0; i < 100; i++) {
+		t.push(new Date());
+	}
+}, 10);
+setInterval(() => {
+	while (t.length > 0) {
+		t.pop();
+	}
+});
+
+// Setup server to Prometheus scrapes:
+
+server.get('/metrics', async (req, res) => {
+	try {
+		res.set('Content-Type', register.contentType);
+		res.end(await register.metrics());
+	} catch (ex) {
+		res.status(500).end(ex);
+	}
+});
+
+server.get('/metrics/counter', async (req, res) => {
+	try {
+		res.set('Content-Type', register.contentType);
+		res.end(await register.getSingleMetricAsString('test_counter'));
+	} catch (ex) {
+		res.status(500).end(ex);
+	}
+});
+
+const port = process.env.PORT || 3000;
+console.log(
+	`Server listening to ${port}, metrics exposed on /metrics endpoint`,
+);
+server.listen(port);
